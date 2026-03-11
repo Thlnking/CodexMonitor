@@ -134,7 +134,20 @@ where
         return Err("Cannot create a worktree from another worktree.".to_string());
     }
 
-    let worktree_root = data_dir.join("worktrees").join(&parent_entry.id);
+    // Determine worktree root: per-workspace setting > global setting > default
+    let worktree_root = if let Some(custom_folder) = &parent_entry.settings.worktrees_folder {
+        PathBuf::from(custom_folder)
+    } else {
+        let global_folder = {
+            let settings = app_settings.lock().await;
+            settings.global_worktrees_folder.clone()
+        };
+        if let Some(global_folder) = global_folder {
+            PathBuf::from(global_folder).join(&parent_entry.id)
+        } else {
+            data_dir.join("worktrees").join(&parent_entry.id)
+        }
+    };
     std::fs::create_dir_all(&worktree_root)
         .map_err(|err| format!("Failed to create worktree directory: {err}"))?;
 
