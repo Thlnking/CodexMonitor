@@ -406,8 +406,6 @@ where
         return Err("Branch name is unchanged.".to_string());
     }
 
-    run_git_command(&parent_root, &["branch", "-m", &old_branch, &final_branch]).await?;
-
     // Use the same priority logic as add_worktree_core:
     // per-workspace setting > global setting > default
     let worktree_root = if let Some(custom_folder) = &parent.settings.worktrees_folder {
@@ -430,10 +428,15 @@ where
     let current_path = PathBuf::from(&entry.path);
     let next_path = unique_worktree_path_for_rename(&worktree_root, &safe_name, &current_path)?;
     let next_path_string = next_path.to_string_lossy().to_string();
-    if next_path_string != entry.path {
+    let old_path_string = entry.path.clone();
+
+    run_git_command(&parent_root, &["branch", "-m", &old_branch, &final_branch]).await?;
+
+    let mut moved_worktree = false;
+    if next_path_string != old_path_string {
         if let Err(error) = run_git_command(
             &parent_root,
-            &["worktree", "move", &entry.path, &next_path_string],
+            &["worktree", "move", &old_path_string, &next_path_string],
         )
         .await
         {
@@ -441,33 +444,64 @@ where
                 run_git_command(&parent_root, &["branch", "-m", &final_branch, &old_branch]).await;
             return Err(error);
         }
+        moved_worktree = true;
     }
 
-    let (entry_snapshot, list) = {
+    let update_result: Result<(WorkspaceEntry, WorkspaceEntry, Vec<WorkspaceEntry>), String> = {
         let mut workspaces = workspaces.lock().await;
-        let entry = match workspaces.get_mut(&id) {
-            Some(entry) => entry,
-            None => return Err("workspace not found".to_string()),
-        };
-        if entry.name.trim() == old_branch {
-            entry.name = final_branch.clone();
-        }
-        entry.path = next_path_string.clone();
-        match entry.worktree.as_mut() {
-            Some(worktree) => {
-                worktree.branch = final_branch.clone();
+        if let Some(entry) = workspaces.get_mut(&id) {
+            let old_snapshot = entry.clone();
+            if entry.name.trim() == old_branch {
+                entry.name = final_branch.clone();
             }
-            None => {
-                entry.worktree = Some(WorktreeInfo {
-                    branch: final_branch.clone(),
-                });
+            entry.path = next_path_string.clone();
+            match entry.worktree.as_mut() {
+                Some(worktree) => {
+                    worktree.branch = final_branch.clone();
+                }
+                None => {
+                    entry.worktree = Some(WorktreeInfo {
+                        branch: final_branch.clone(),
+                    });
+                }
             }
+            let snapshot = entry.clone();
+            let list: Vec<_> = workspaces.values().cloned().collect();
+            Ok((old_snapshot, snapshot, list))
+        } else {
+            Err("workspace not found".to_string())
         }
-        let snapshot = entry.clone();
-        let list: Vec<_> = workspaces.values().cloned().collect();
-        (snapshot, list)
     };
-    write_workspaces(storage_path, &list)?;
+    let (old_snapshot, entry_snapshot, list) = match update_result {
+        Ok(value) => value,
+        Err(error) => {
+            if moved_worktree {
+                let _ = run_git_command(
+                    &parent_root,
+                    &["worktree", "move", &next_path_string, &old_path_string],
+                )
+                .await;
+            }
+            let _ =
+                run_git_command(&parent_root, &["branch", "-m", &final_branch, &old_branch]).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_workspaces(storage_path, &list) {
+        if moved_worktree {
+            let _ = run_git_command(
+                &parent_root,
+                &["worktree", "move", &next_path_string, &old_path_string],
+            )
+            .await;
+        }
+        let _ = run_git_command(&parent_root, &["branch", "-m", &final_branch, &old_branch]).await;
+        let mut workspaces = workspaces.lock().await;
+        if let Some(entry) = workspaces.get_mut(&id) {
+            *entry = old_snapshot;
+        }
+        return Err(error);
+    }
 
     if let Some(session) = sessions.lock().await.get(&entry_snapshot.id).cloned() {
         session
