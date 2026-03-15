@@ -29,7 +29,7 @@ export function SettingsEnvironmentsSection({
   environmentSavedScript,
   environmentDirty,
   worktreesFolderDraft,
-  worktreesFolderSaved,
+  worktreesFolderSaved: _worktreesFolderSaved,
   worktreesFolderDirty,
   onSetEnvironmentWorkspaceId,
   onSetEnvironmentDraftScript,
